@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<title>PixelWorld</title>
+<style>
+  body {
+    background: #1a1a1a;
+    color: white;
+    font-family: sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px;
+  }
+  h1 { font-size: 20px; margin-bottom: 5px; }
+  p { color: #aaa; margin-top: 0; }
+  #status { color: #6f6; font-size: 13px; height: 18px; }
+  #canvas {
+    border: 2px solid #555;
+    image-rendering: pixelated;
+    cursor: crosshair;
+  }
+  #palette {
+    display: flex;
+    gap: 6px;
+    margin: 15px 0;
+  }
+  .color {
+    width: 32px;
+    height: 32px;
+    border-radius: 4px;
+    cursor: pointer;
+    border: 2px solid transparent;
+  }
+  .color.selected {
+    border: 2px solid white;
+  }
+</style>
+</head>
+<body>
+
+<h1>🌍 PixelWorld</h1>
+<p>Bir renk seç, canvas'a tıkla. Herkes aynı anda görür.</p>
+<div id="status">Bağlanıyor...</div>
+
+<div id="palette"></div>
+<canvas id="canvas" width="640" height="640"></canvas>
+
+<script>
+  const GRID_SIZE = 64;
+  const PIXEL_SIZE = 640 / GRID_SIZE;
+
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  const statusDiv = document.getElementById('status');
+
+  const COLORS = [
+    '#ffffff', '#e4e4e4', '#888888', '#222222',
+    '#ffa7d1', '#e50000', '#e59500', '#a06a42',
+    '#e5d900', '#94e044', '#02be01', '#00d3dd',
+    '#0083c7', '#0000ea', '#cf6ee4', '#820080'
+  ];
+
+  let selectedColor = COLORS[4];
+  let world = new Array(GRID_SIZE * GRID_SIZE).fill('#ffffff');
+  let onCooldown = false;
+
+  // --- Palet ---
+  const paletteDiv = document.getElementById('palette');
+  COLORS.forEach((color) => {
+    const swatch = document.createElement('div');
+    swatch.className = 'color';
+    swatch.style.background = color;
+    if (color === selectedColor) swatch.classList.add('selected');
+    swatch.addEventListener('click', () => {
+      selectedColor = color;
+      document.querySelectorAll('.color').forEach(el => el.classList.remove('selected'));
+      swatch.classList.add('selected');
+    });
+    paletteDiv.appendChild(swatch);
+  });
+
+  function draw() {
+    for (let y = 0; y < GRID_SIZE; y++) {
+      for (let x = 0; x < GRID_SIZE; x++) {
+        ctx.fillStyle = world[y * GRID_SIZE + x];
+        ctx.fillRect(x * PIXEL_SIZE, y * PIXEL_SIZE, PIXEL_SIZE, PIXEL_SIZE);
+      }
+    }
+  }
+
+  // --- WebSocket bağlantısı ---
+  // Sayfa https ise wss://, http ise ws:// kullanır (otomatik algılar)
+  const protocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  const ws = new WebSocket(protocol + location.host);
+
+  ws.onopen = () => {
+    statusDiv.textContent = '✅ Bağlandı';
+  };
+
+  ws.onclose = () => {
+    statusDiv.textContent = '❌ Bağlantı koptu, sayfayı yenile';
+  };
+
+  ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+
+    if (msg.type === 'world') {
+      world = msg.world;
+      draw();
+    } else if (msg.type === 'update') {
+      world[msg.y * GRID_SIZE + msg.x] = msg.color;
+      draw();
+    } else if (msg.type === 'cooldown') {
+      const seconds = (msg.remaining / 1000).toFixed(1);
+      statusDiv.textContent = `⏳ Bekle: ${seconds}sn`;
+      onCooldown = true;
+      setTimeout(() => {
+        onCooldown = false;
+        statusDiv.textContent = '✅ Bağlandı';
+      }, msg.remaining);
+    }
+  };
+
+  canvas.addEventListener('click', (e) => {
+    if (onCooldown) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.floor((e.clientX - rect.left) / PIXEL_SIZE);
+    const y = Math.floor((e.clientY - rect.top) / PIXEL_SIZE);
+
+    ws.send(JSON.stringify({ type: 'place', x, y, color: selectedColor }));
+  });
+
+  draw();
+</script>
+
+</body>
+</html>
