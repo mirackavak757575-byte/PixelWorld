@@ -3,70 +3,124 @@
 <head>
 <meta charset="UTF-8">
 <title>PixelWorld</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <style>
-  body {
-    background: #1a1a1a;
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #0a0a12;
     color: white;
     font-family: sans-serif;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    padding: 20px;
+    height: 100%;
+    overflow: hidden;
   }
-  h1 { font-size: 20px; margin-bottom: 5px; }
-  p { color: #aaa; margin-top: 0; }
-  #status { color: #6f6; font-size: 13px; height: 18px; }
-  #canvas {
-    border: 2px solid #555;
-    image-rendering: pixelated;
-    cursor: crosshair;
+  #map {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: #0a0a12;
+  }
+  #topbar {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    z-index: 1000;
+    background: rgba(20,20,30,0.9);
+    padding: 10px 16px;
+    border-radius: 8px;
+    max-width: 320px;
+  }
+  #topbar h1 {
+    font-size: 16px;
+    margin: 0 0 4px 0;
+  }
+  #topbar p {
+    font-size: 12px;
+    color: #aaa;
+    margin: 0;
+  }
+  #status {
+    font-size: 12px;
+    color: #6f6;
+    margin-top: 6px;
   }
   #palette {
+    position: absolute;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 1000;
     display: flex;
     gap: 6px;
-    margin: 15px 0;
+    background: rgba(20,20,30,0.9);
+    padding: 10px;
+    border-radius: 10px;
   }
   .color {
-    width: 32px;
-    height: 32px;
-    border-radius: 4px;
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
     cursor: pointer;
     border: 2px solid transparent;
   }
   .color.selected {
     border: 2px solid white;
   }
+  #countryinfo {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 1000;
+    background: rgba(20,20,30,0.9);
+    padding: 10px 16px;
+    border-radius: 8px;
+    font-size: 13px;
+    max-width: 260px;
+    display: none;
+  }
+  #countryinfo b { font-size: 15px; }
+  .bar-bg {
+    background: #333;
+    border-radius: 4px;
+    height: 8px;
+    margin-top: 6px;
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    background: #4caf50;
+  }
 </style>
 </head>
 <body>
 
-<h1>🌍 PixelWorld</h1>
-<p>Bir renk seç, canvas'a tıkla. Herkes aynı anda görür.</p>
-<div id="status">Bağlanıyor...</div>
+<div id="map"></div>
+
+<div id="topbar">
+  <h1>🌍 PixelWorld</h1>
+  <p>Bir renk seç, bir ülkeye tıkla, o ülkeyi fethetmeye başla.</p>
+  <div id="status">Bağlanıyor...</div>
+</div>
+
+<div id="countryinfo">
+  <b id="ci-name">-</b>
+  <div id="ci-owner">Sahip: kimse yok</div>
+  <div class="bar-bg"><div class="bar-fill" id="ci-bar" style="width:0%"></div></div>
+</div>
 
 <div id="palette"></div>
-<canvas id="canvas" width="640" height="640"></canvas>
 
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-  const GRID_SIZE = 64;
-  const PIXEL_SIZE = 640 / GRID_SIZE;
-
-  const canvas = document.getElementById('canvas');
-  const ctx = canvas.getContext('2d');
-  const statusDiv = document.getElementById('status');
-
+  // --- Renk paleti (her renk bir "oyuncu"yu temsil ediyor gibi düşün) ---
   const COLORS = [
-    '#ffffff', '#e4e4e4', '#888888', '#222222',
-    '#ffa7d1', '#e50000', '#e59500', '#a06a42',
-    '#e5d900', '#94e044', '#02be01', '#00d3dd',
-    '#0083c7', '#0000ea', '#cf6ee4', '#820080'
+    '#e50000', '#0000ea', '#02be01', '#e5d900',
+    '#e59500', '#820080', '#00d3dd', '#ffa7d1'
   ];
+  let selectedColor = COLORS[0];
 
-  let selectedColor = COLORS[4];
-  let world = new Array(GRID_SIZE * GRID_SIZE).fill('#ffffff');
-  let onCooldown = false;
-
-  // --- Palet ---
   const paletteDiv = document.getElementById('palette');
   COLORS.forEach((color) => {
     const swatch = document.createElement('div');
@@ -81,59 +135,99 @@
     paletteDiv.appendChild(swatch);
   });
 
-  function draw() {
-    for (let y = 0; y < GRID_SIZE; y++) {
-      for (let x = 0; x < GRID_SIZE; x++) {
-        ctx.fillStyle = world[y * GRID_SIZE + x];
-        ctx.fillRect(x * PIXEL_SIZE, y * PIXEL_SIZE, PIXEL_SIZE, PIXEL_SIZE);
-      }
-    }
-  }
+  // --- Harita kurulumu (Leaflet) ---
+  const map = L.map('map', {
+    worldCopyJump: true,
+    minZoom: 2,
+    maxZoom: 8
+  }).setView([20, 0], 2);
+
+  // Koyu tema arka plan (CartoDB dark, ücretsiz)
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; OpenStreetMap &copy; CARTO',
+    subdomains: 'abcd'
+  }).addTo(map);
+
+  const statusDiv = document.getElementById('status');
+  const countryInfo = document.getElementById('countryinfo');
+  const ciName = document.getElementById('ci-name');
+  const ciOwner = document.getElementById('ci-owner');
+  const ciBar = document.getElementById('ci-bar');
+
+  let countryLayers = {};   // countryId -> leaflet layer
+  let countryState = {};    // countryId -> { owner: color, percent: 0-100 }
 
   // --- WebSocket bağlantısı ---
-  // Sayfa https ise wss://, http ise ws:// kullanır (otomatik algılar)
   const protocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
   const ws = new WebSocket(protocol + location.host);
 
-  ws.onopen = () => {
-    statusDiv.textContent = '✅ Bağlandı';
-  };
-
-  ws.onclose = () => {
-    statusDiv.textContent = '❌ Bağlantı koptu, sayfayı yenile';
-  };
+  ws.onopen = () => { statusDiv.textContent = '✅ Bağlandı'; };
+  ws.onclose = () => { statusDiv.textContent = '❌ Bağlantı koptu, sayfayı yenile'; };
 
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
-
-    if (msg.type === 'world') {
-      world = msg.world;
-      draw();
-    } else if (msg.type === 'update') {
-      world[msg.y * GRID_SIZE + msg.x] = msg.color;
-      draw();
+    if (msg.type === 'state') {
+      countryState = msg.state;
+      applyAllColors();
+    } else if (msg.type === 'countryUpdate') {
+      countryState[msg.id] = msg.data;
+      applyColor(msg.id);
+      if (currentSelectedId === msg.id) updateInfoPanel(msg.id);
     } else if (msg.type === 'cooldown') {
       const seconds = (msg.remaining / 1000).toFixed(1);
       statusDiv.textContent = `⏳ Bekle: ${seconds}sn`;
-      onCooldown = true;
-      setTimeout(() => {
-        onCooldown = false;
-        statusDiv.textContent = '✅ Bağlandı';
-      }, msg.remaining);
+      setTimeout(() => { statusDiv.textContent = '✅ Bağlandı'; }, msg.remaining);
     }
   };
 
-  canvas.addEventListener('click', (e) => {
-    if (onCooldown) return;
+  function ownerColor(id) {
+    const s = countryState[id];
+    return (s && s.owner) ? s.owner : '#3a3a45';
+  }
 
-    const rect = canvas.getBoundingClientRect();
-    const x = Math.floor((e.clientX - rect.left) / PIXEL_SIZE);
-    const y = Math.floor((e.clientY - rect.top) / PIXEL_SIZE);
+  function applyColor(id) {
+    const layer = countryLayers[id];
+    if (!layer) return;
+    layer.setStyle({ fillColor: ownerColor(id), fillOpacity: 0.55 });
+  }
 
-    ws.send(JSON.stringify({ type: 'place', x, y, color: selectedColor }));
-  });
+  function applyAllColors() {
+    Object.keys(countryLayers).forEach(applyColor);
+  }
 
-  draw();
+  let currentSelectedId = null;
+  function updateInfoPanel(id) {
+    const s = countryState[id] || { owner: null, percent: 0 };
+    ciBar.style.width = s.percent + '%';
+    ciBar.style.background = s.owner || '#4caf50';
+    ciOwner.textContent = s.owner ? `Sahip: ${s.owner} (%${s.percent})` : 'Sahip: kimse yok';
+  }
+
+  // --- Dünya ülke sınırlarını yükle (public GeoJSON) ---
+  fetch('https://raw.githubusercontent.com/johan/world.geo.json/master/countries.geo.json')
+    .then(r => r.json())
+    .then(geojson => {
+      L.geoJSON(geojson, {
+        style: { color: '#666', weight: 1, fillColor: '#3a3a45', fillOpacity: 0.55 },
+        onEachFeature: (feature, layer) => {
+          const id = feature.id || feature.properties.name;
+          countryLayers[id] = layer;
+
+          layer.on('click', () => {
+            currentSelectedId = id;
+            ciName.textContent = feature.properties.name;
+            countryInfo.style.display = 'block';
+            updateInfoPanel(id);
+
+            ws.send(JSON.stringify({ type: 'claim', id, color: selectedColor, name: feature.properties.name }));
+          });
+
+          layer.on('mouseover', () => layer.setStyle({ weight: 2, color: '#fff' }));
+          layer.on('mouseout', () => layer.setStyle({ weight: 1, color: '#666' }));
+        }
+      }).addTo(map);
+      applyAllColors();
+    });
 </script>
 
 </body>
