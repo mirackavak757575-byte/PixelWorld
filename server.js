@@ -1,6 +1,9 @@
-// PixelWorld sunucusu - ülke bazlı fetih sistemi
-// Her tıklama, bir ülkenin "senin renginle boyalı yüzdesini" bir miktar artırır.
-// %50'nin üzerine çıkan renk o ülkenin "sahibi" (owner) olur.
+// PixelEmpire sunucusu
+// Klasik pixel-pixel boyama. Cooldown yerine "sayaç" sistemi var:
+// - Her oyuncunun bir sayacı var, 0'dan başlıyor, saniyede 1 azalıyor (zamanla erimesi)
+// - Her pixel koyduğunda sayaç artıyor: genelde +1, ara sıra +4/+5/+6/+7 (rastgele)
+// - Zaten boyalı bir pixelin üzerine FARKLI bir renk koyarsan, artış 2 katına çıkıyor
+// - Sayaç 120'ye (2 dakika) ulaşınca/geçince yeni pixel KOYAMAZSIN, azalmasını beklemen lazım
 
 const express = require('express');
 const { WebSocketServer } = require('ws');
@@ -12,49 +15,61 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-const SAVE_FILE = path.join(__dirname, 'world-state.json');
-const COOLDOWN_MS = 3000;        // her tıklama arası 3 saniye
-const CLAIM_STEP = 8;            // her tıklama, o rengin yüzdesini bu kadar artırır
+const SAVE_FILE = path.join(__dirname, 'pixels-state.json');
 
-// --- Durumu yükle ---
-// state[countryId] = { percentages: { '#e50000': 40, '#0000ea': 10 }, owner: '#e50000', percent: 40 }
-let state = {};
+const MAX_COUNTER = 120;        // 2 dakika (saniye cinsinden)
+const DECAY_PER_SECOND = 1;     // sayaç saniyede 1 azalır
+
+// --- Pixelleri yükle ---
+// pixels["x_y"] = "#renk"
+let pixels = {};
 if (fs.existsSync(SAVE_FILE)) {
-  state = JSON.parse(fs.readFileSync(SAVE_FILE, 'utf8'));
-  console.log('Dünya durumu diskten yüklendi.');
+  try {
+    pixels = JSON.parse(fs.readFileSync(SAVE_FILE, 'utf8'));
+    console.log('Kayıtlı pixel verisi yüklendi. Toplam pixel:', Object.keys(pixels).length);
+  } catch (e) {
+    console.log('Kayıt dosyası okunamadı, boş başlanıyor.');
+  }
 } else {
   console.log('Yeni boş dünya oluşturuldu.');
 }
 
-const lastPlaced = {}; // ip -> timestamp
+// --- Kullanıcı sayaçları (IP bazlı) ---
+// userCounters[ip] = { value: number, lastUpdate: timestamp_ms }
+const userCounters = {};
 
+function getCurrentCounter(ip) {
+  const rec = userCounters[ip];
+  if (!rec) return 0;
+  const elapsedSec = (Date.now() - rec.lastUpdate) / 1000;
+  return Math.max(0, rec.value - elapsedSec * DECAY_PER_SECOND);
+}
+
+function randomIncrement() {
+  // %80 ihtimalle 1, %20 ihtimalle 4/5/6/7 arasından rastgele
+  if (Math.random() < 0.2) {
+    const options = [4, 5, 6, 7];
+    return options[Math.floor(Math.random() * options.length)];
+  }
+  return 1;
+}
+
+// Periyodik kayıt (10 saniyede bir)
 setInterval(() => {
-  fs.writeFileSync(SAVE_FILE, JSON.stringify(state));
+  fs.writeFileSync(SAVE_FILE, JSON.stringify(pixels));
 }, 10000);
 
 app.use(express.static(path.join(__dirname, 'public')));
-
-function getCountry(id) {
-  if (!state[id]) {
-    state[id] = { percentages: {}, owner: null, percent: 0 };
-  }
-  return state[id];
-}
-
-function publicView(country) {
-  return { owner: country.owner, percent: country.percent };
-}
 
 wss.on('connection', (ws, req) => {
   const ip = req.socket.remoteAddress;
   console.log('Yeni bağlantı:', ip);
 
-  // Yeni bağlanan kullanıcıya tüm ülke durumlarını gönder (sadece owner+percent, iç detay değil)
-  const publicState = {};
-  Object.keys(state).forEach(id => {
-    publicState[id] = publicView(state[id]);
-  });
-  ws.send(JSON.stringify({ type: 'state', state: publicState }));
+  ws.send(JSON.stringify({
+    type: 'world',
+    pixels,
+    counter: Math.round(getCurrentCounter(ip))
+  }));
 
   ws.on('message', (data) => {
     let msg;
@@ -64,54 +79,39 @@ wss.on('connection', (ws, req) => {
       return;
     }
 
-    if (msg.type === 'claim') {
-      const { id, color } = msg;
-      if (!id || !color) return;
+    if (msg.type === 'place') {
+      const { x, y, color } = msg;
+      if (typeof x !== 'number' || typeof y !== 'number' || !color) return;
+      if (x < 0 || x >= 360 || y < 0 || y >= 180) return;
 
-      const now = Date.now();
-      const last = lastPlaced[ip] || 0;
-      if (now - last < COOLDOWN_MS) {
-        ws.send(JSON.stringify({ type: 'cooldown', remaining: COOLDOWN_MS - (now - last) }));
+      const current = getCurrentCounter(ip);
+
+      if (current >= MAX_COUNTER) {
+        ws.send(JSON.stringify({ type: 'blocked', value: Math.round(current) }));
         return;
       }
-      lastPlaced[ip] = now;
 
-      const country = getCountry(id);
+      const key = x + '_' + y;
+      const existingColor = pixels[key];
 
-      // Bu rengin yüzdesini artır, diğer renklerden orantılı düş
-      const current = country.percentages[color] || 0;
-      const gain = Math.min(CLAIM_STEP, 100 - current);
-      country.percentages[color] = current + gain;
-
-      // Diğer renklerin toplamını normalize et (100'ü geçmesin)
-      let total = Object.values(country.percentages).reduce((a, b) => a + b, 0);
-      if (total > 100) {
-        const excess = total - 100;
-        const others = Object.keys(country.percentages).filter(c => c !== color);
-        const othersTotal = others.reduce((a, c) => a + country.percentages[c], 0) || 1;
-        others.forEach(c => {
-          country.percentages[c] = Math.max(0, country.percentages[c] - (excess * (country.percentages[c] / othersTotal)));
-        });
+      let inc = randomIncrement();
+      if (existingColor && existingColor !== color) {
+        inc *= 2; // farklı renkli boyalı pixelin üzerine koymak 2 katı sayaç yakar
       }
 
-      // Yeni sahibi belirle (en yüksek yüzdeye sahip renk, en az %20 olmalı)
-      let bestColor = null, bestPct = 0;
-      Object.entries(country.percentages).forEach(([c, pct]) => {
-        if (pct > bestPct) { bestPct = pct; bestColor = c; }
-      });
-      if (bestPct >= 20) {
-        country.owner = bestColor;
-        country.percent = Math.round(bestPct);
-      } else {
-        country.owner = null;
-        country.percent = 0;
-      }
+      pixels[key] = color;
 
-      // Herkese yay
-      const update = JSON.stringify({ type: 'countryUpdate', id, data: publicView(country) });
+      const newValue = current + inc; // MAX'ı geçebilir, bir sonraki koymayı engeller
+      userCounters[ip] = { value: newValue, lastUpdate: Date.now() };
+
+      // Bu pixel'i herkese yay
+      const update = JSON.stringify({ type: 'update', x, y, color });
       wss.clients.forEach((client) => {
         if (client.readyState === 1) client.send(update);
       });
+
+      // Sayaç bilgisini sadece bu kullanıcıya gönder
+      ws.send(JSON.stringify({ type: 'counter', value: Math.round(newValue) }));
     }
   });
 
