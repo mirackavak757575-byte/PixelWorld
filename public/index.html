@@ -112,8 +112,9 @@
   // ================= AYARLAR =================
   const WORLD_W = 360;      // dünya grid genişliği (hücre)
   const WORLD_H = 180;      // dünya grid yüksekliği (hücre)
-  const CELL = 4;           // her hücrenin temel (zoom=1) piksel boyutu
-  const MAP_IMAGE_URL = 'https://upload.wikimedia.org/wikipedia/commons/8/83/Equirectangular_projection_SW.jpg';
+  const CELL = 2;           // her hücrenin temel (zoom=1) piksel boyutu (küçük pixel)
+  const LAND_COLOR = '#4a7c59';
+  const SEA_COLOR = '#16324f';
 
   const COLORS = [
     '#e50000', '#0000ea', '#02be01', '#e5d900',
@@ -163,13 +164,32 @@
     pan.y = (canvas.height - worldPixelH * zoom) / 2;
   }
 
-  const mapImage = new Image();
-  mapImage.crossOrigin = 'anonymous';
-  let mapLoaded = false;
-  mapImage.onload = () => { mapLoaded = true; render(); };
-  mapImage.src = MAP_IMAGE_URL;
-
   let pixels = {}; // "x_y" -> color
+  let terrainCanvas = null; // önceden çizilmiş kara/deniz katmanı
+
+  function buildTerrainCanvas(terrainStr) {
+    const c = document.createElement('canvas');
+    c.width = worldPixelW;
+    c.height = worldPixelH;
+    const tctx = c.getContext('2d');
+    tctx.fillStyle = SEA_COLOR;
+    tctx.fillRect(0, 0, worldPixelW, worldPixelH);
+    tctx.fillStyle = LAND_COLOR;
+    for (let gy = 0; gy < WORLD_H; gy++) {
+      const rowOffset = gy * WORLD_W;
+      let runStart = -1;
+      for (let gx = 0; gx <= WORLD_W; gx++) {
+        const isLand = gx < WORLD_W && terrainStr[rowOffset + gx] === 'L';
+        if (isLand && runStart === -1) {
+          runStart = gx;
+        } else if (!isLand && runStart !== -1) {
+          tctx.fillRect(runStart * CELL, gy * CELL, (gx - runStart) * CELL, CELL);
+          runStart = -1;
+        }
+      }
+    }
+    terrainCanvas = c;
+  }
 
   function render() {
     ctx.fillStyle = '#05070d';
@@ -179,12 +199,10 @@
     ctx.translate(pan.x, pan.y);
     ctx.scale(zoom, zoom);
 
-    if (mapLoaded) {
-      ctx.globalAlpha = 0.55;
-      ctx.drawImage(mapImage, 0, 0, worldPixelW, worldPixelH);
-      ctx.globalAlpha = 1;
+    if (terrainCanvas) {
+      ctx.drawImage(terrainCanvas, 0, 0);
     } else {
-      ctx.fillStyle = '#11131c';
+      ctx.fillStyle = SEA_COLOR;
       ctx.fillRect(0, 0, worldPixelW, worldPixelH);
     }
 
@@ -303,6 +321,7 @@
 
     if (msg.type === 'world') {
       pixels = msg.pixels;
+      buildTerrainCanvas(msg.terrain);
       counterValue = msg.counter;
       counterReceivedAt = Date.now();
       updateCounterDisplay();
